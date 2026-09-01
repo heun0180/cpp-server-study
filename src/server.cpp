@@ -54,7 +54,20 @@ int main()
 
     std::cout << "Server is listening on port 7777 " << std::endl;
 
-    // 서버 소켓 종료
+    //클라이언트 접속 대기
+    int clientSocket = accept(serverSocket, nullptr, nullptr);
+
+    if (clientSocket == -1)
+    {
+        std::cout << "Accept failed: " << std::strerror(errno) << std::endl;
+        close(serverSocket);
+        return 1;
+    }
+
+    std::cout << "Client connected!" << std::endl;
+
+    // 소켓 종료
+    close(clientSocket);
     close(serverSocket);
 
     return 0;
