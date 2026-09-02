@@ -65,31 +65,38 @@ int main()
         return 1;
     }
 
-    std::cout << "Client connected!" << std::endl;
-
-    //클라이언트가 보낸 데이터 수신
-    char buffer[1024] = {};
-
-    int receivedBytes = recv(
-        clientSocket,
-        buffer,
-        sizeof(buffer) - 1,
-        0
-    );
-
-    if (receivedBytes > 0)
+    while (true)
     {
-        std::cout << "" << buffer << std::endl;
+        std::string message;
 
-        // 클라이언트에게 응답 전송
-        const char* response = "Hello Client!";
+        std::cout << "Message: ";
+        std::getline(std::cin, message);
 
+        // 서버로 메시지 전송
         send(
             clientSocket,
-            response,
-            strlen(response),
+            message.c_str(),
+            message.size(),
             0
         );
+
+        // 서버 응답 수신
+        char buffer[1024] = {};
+
+        int receivedBytes = recv(
+            clientSocket,
+            buffer,
+            sizeof(buffer) - 1,
+            0
+        );
+
+        if (receivedBytes <= 0)
+        {
+            std::cout << "Server disconnected" << std::endl;
+            break;
+        }
+
+        std::cout << "Server: " << buffer << std::endl;
     }
 
     // 소켓 종료

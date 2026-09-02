@@ -20,31 +20,38 @@ int main()
         sizeof(serverAddress)
     );
 
-    std::cout << "Connected to server!" << std::endl;
-
-    //서버로 메세지 전송
-    const char* message = "Helloooooooo Server!";
-
-    send(
-        clientSocket,
-        message,
-        strlen(message),
-        0
-    );
-
-    // 서버가 보낸 응답 수신
-    char buffer[1024] = {};
-
-    int receivedBytes = recv(
-        clientSocket,
-        buffer,
-        sizeof(buffer) - 1,
-        0
-    );
-
-    if (receivedBytes > 0)
+    while (true)
     {
-        std::cout << "" << buffer << std::endl;
+        std::string message;
+
+        std::cout << "Message: ";
+        std::getline(std::cin, message);
+
+        // 서버로 메시지 전송
+        send(
+            clientSocket,
+            message.c_str(),
+            message.size(),
+            0
+        );
+
+        // 서버 응답 수신
+        char buffer[1024] = {};
+
+        int receivedBytes = recv(
+            clientSocket,
+            buffer,
+            sizeof(buffer) - 1,
+            0
+        );
+
+        if (receivedBytes <= 0)
+        {
+            std::cout << "Server disconnected" << std::endl;
+            break;
+        }
+
+        std::cout << "Server: " << buffer << std::endl;
     }
 
     //사용한 소켓 종료
