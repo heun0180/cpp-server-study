@@ -2,6 +2,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <cstring>
 
 int main()
 {
@@ -76,9 +77,19 @@ int main()
         0
     );
 
-    if(receivedBytes > 0)
+    if (receivedBytes > 0)
     {
         std::cout << "" << buffer << std::endl;
+
+        // 클라이언트에게 응답 전송
+        const char* response = "Hello Client!";
+
+        send(
+            clientSocket,
+            response,
+            strlen(response),
+            0
+        );
     }
 
     // 소켓 종료

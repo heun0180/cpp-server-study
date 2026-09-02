@@ -32,6 +32,21 @@ int main()
         0
     );
 
+    // 서버가 보낸 응답 수신
+    char buffer[1024] = {};
+
+    int receivedBytes = recv(
+        clientSocket,
+        buffer,
+        sizeof(buffer) - 1,
+        0
+    );
+
+    if (receivedBytes > 0)
+    {
+        std::cout << "" << buffer << std::endl;
+    }
+
     //사용한 소켓 종료
     close(clientSocket);
 
