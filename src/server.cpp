@@ -3,6 +3,30 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <cstring>
+#include <thread>
+
+void receiveMessages(int clientSocket)
+{
+    while (true)
+    {
+        char buffer[1024] = {};
+
+        int receivedBytes = recv(
+            clientSocket,
+            buffer,
+            sizeof(buffer) - 1,
+            0
+        );
+
+        if (receivedBytes <= 0)
+        {
+            std::cout << "Client disconnected" << std::endl;
+            break;
+        }
+
+        std::cout << "\nServer: " << buffer << std::endl;
+    }
+}
 
 int main()
 {
@@ -65,6 +89,9 @@ int main()
         return 1;
     }
 
+
+    std::thread receiveThread(receiveMessages, clientSocket);
+
     while (true)
     {
         std::string message;
@@ -72,31 +99,12 @@ int main()
         std::cout << "Message: ";
         std::getline(std::cin, message);
 
-        // 서버로 메시지 전송
         send(
             clientSocket,
             message.c_str(),
             message.size(),
             0
         );
-
-        // 서버 응답 수신
-        char buffer[1024] = {};
-
-        int receivedBytes = recv(
-            clientSocket,
-            buffer,
-            sizeof(buffer) - 1,
-            0
-        );
-
-        if (receivedBytes <= 0)
-        {
-            std::cout << "Server disconnected" << std::endl;
-            break;
-        }
-
-        std::cout << "Server: " << buffer << std::endl;
     }
 
     // 소켓 종료
