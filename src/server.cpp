@@ -4,8 +4,10 @@
 #include <unistd.h>
 #include <cstring>
 #include <thread>
+#include <vector>
+#include <mutex>
 
-void receiveMessages(int clientSocket)
+void receiveMessages(int clientSocket, std::vector<int>&clients, std::mutex& clientsMutex)
 {
     while (true)
     {
@@ -24,8 +26,27 @@ void receiveMessages(int clientSocket)
             break;
         }
 
-        std::cout << "\nServer: " << buffer << std::endl;
+        std::cout << "Client: " << buffer << std::endl;
+
+        std::lock_guard<std::mutex> lock(clientsMutex);
+        for(int socket : clients)
+        {
+            if(socket == clientSocket)
+                continue;
+
+            send(socket, buffer, receivedBytes, 0);
+        }
     }
+
+    std::lock_guard<std::mutex> lock(clientsMutex);
+
+    // 연결 종료된 클라이언트를 목록에서 제거
+    clients.erase(
+        std::remove(clients.begin(), clients.end(), clientSocket),
+        clients.end()
+    );
+
+    close(clientSocket);
 }
 
 int main()
@@ -70,6 +91,9 @@ int main()
     //클라이언트 접속 대기 준비
     int listenresult = listen(serverSocket, 5);
 
+    std::vector<int> clients;
+    std::mutex clientsMutex;
+
     if (listenresult == -1)
     {
         std::cout << "Listen failed: " << std::strerror(errno) << std::endl;
@@ -79,36 +103,33 @@ int main()
 
     std::cout << "Server is listening on port 7777 " << std::endl;
 
-    //클라이언트 접속 대기
-    int clientSocket = accept(serverSocket, nullptr, nullptr);
-
-    if (clientSocket == -1)
-    {
-        std::cout << "Accept failed: " << std::strerror(errno) << std::endl;
-        close(serverSocket);
-        return 1;
-    }
-
-
-    std::thread receiveThread(receiveMessages, clientSocket);
-
     while (true)
     {
-        std::string message;
-
-        std::cout << "Message: ";
-        std::getline(std::cin, message);
-
-        send(
-            clientSocket,
-            message.c_str(),
-            message.size(),
-            0
+        // 새로운 클라이언트 접속 대기
+        int clientSocket = accept(
+            serverSocket,
+            nullptr,
+            nullptr
         );
+
+        if (clientSocket == -1)
+        {
+            std::cout << "Accept failed" << std::endl;
+            continue;
+        }
+
+        // 접속한 클라이언트 소켓 저장
+        std::lock_guard<std::mutex> lock(clientsMutex);
+        clients.push_back(clientSocket);
+
+        std::cout << "Client connected!" << std::endl;
+        std::cout << "Connected clients: " << clients.size() << std::endl;
+
+        std::thread(receiveMessages, clientSocket, std::ref(clients), std::ref(clientsMutex)).detach();
     }
 
+
     // 소켓 종료
-    close(clientSocket);
     close(serverSocket);
 
     return 0;
