@@ -66,6 +66,21 @@ int main()
 
     std::cout << "Client connected!" << std::endl;
 
+    //클라이언트가 보낸 데이터 수신
+    char buffer[1024] = {};
+
+    int receivedBytes = recv(
+        clientSocket,
+        buffer,
+        sizeof(buffer) - 1,
+        0
+    );
+
+    if(receivedBytes > 0)
+    {
+        std::cout << "" << buffer << std::endl;
+    }
+
     // 소켓 종료
     close(clientSocket);
     close(serverSocket);

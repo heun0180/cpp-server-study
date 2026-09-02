@@ -2,6 +2,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <cstring>
 
 int main()
 {
@@ -20,6 +21,16 @@ int main()
     );
 
     std::cout << "Connected to server!" << std::endl;
+
+    //서버로 메세지 전송
+    const char* message = "Helloooooooo Server!";
+
+    send(
+        clientSocket,
+        message,
+        strlen(message),
+        0
+    );
 
     //사용한 소켓 종료
     close(clientSocket);
