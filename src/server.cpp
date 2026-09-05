@@ -6,8 +6,15 @@
 #include <thread>
 #include <vector>
 #include <mutex>
+#include <algorithm>
 
-void receiveMessages(int clientSocket, std::vector<int>&clients, std::mutex& clientsMutex)
+struct ClientInfo
+{
+    int socket;
+    std::string nickname;
+};
+
+void receiveMessages(int clientSocket, std::vector<ClientInfo>&clients, std::mutex& clientsMutex)
 {
     while (true)
     {
@@ -22,29 +29,80 @@ void receiveMessages(int clientSocket, std::vector<int>&clients, std::mutex& cli
 
         if (receivedBytes <= 0)
         {
-            std::cout << "Client disconnected" << std::endl;
             break;
         }
 
-        std::cout << "Client: " << buffer << std::endl;
+        std::string nickname;
+
+        // 메시지를 보낸 클라이언트의 닉네임 찾기
+        {
+            std::lock_guard<std::mutex> lock(clientsMutex);
+
+            for(const ClientInfo& client : clients)
+            {
+                if(client.socket == clientSocket)
+                {
+                    nickname = client.nickname;
+                    break;
+                }
+            }
+        }
+
+        // 닉네임 + 메시지 생성
+        std::string message =
+            "[" + nickname + "] " +
+            std::string(buffer, receivedBytes);
+
+        std::cout << message << std::endl;
+
+
 
         std::lock_guard<std::mutex> lock(clientsMutex);
-        for(int socket : clients)
+        for(const ClientInfo& client : clients)
         {
-            if(socket == clientSocket)
+            if(client.socket == clientSocket)
                 continue;
 
-            send(socket, buffer, receivedBytes, 0);
+            send(client.socket, message.c_str(), message.size(), 0);
         }
     }
 
-    std::lock_guard<std::mutex> lock(clientsMutex);
+    std::lock_guard<std::mutex> lock(clientsMutex); 
+
+    // 삭제하기 전에 퇴장한 클라이언트의 닉네임 찾기
+    std::string nickname;
+    for(const ClientInfo& client : clients)
+    {
+        if(client.socket == clientSocket)
+        {
+            nickname = client.nickname;
+            break;
+        }
+    }
+
+    std::cout << nickname.c_str() << " Client disconnected" << std::endl;
 
     // 연결 종료된 클라이언트를 목록에서 제거
     clients.erase(
-        std::remove(clients.begin(), clients.end(), clientSocket),
+        std::remove_if(
+            clients.begin(),
+            clients.end(),
+            [clientSocket](const ClientInfo& client)
+            {
+                return client.socket == clientSocket;
+            }
+        ),
         clients.end()
     );
+
+    // 퇴장 메시지 생성
+    std::string closeSocketMessage =
+    nickname + "님이 퇴장했습니다.";
+
+    for(const ClientInfo& client : clients)
+    {
+        send(client.socket, closeSocketMessage.c_str(), closeSocketMessage.size(), 0);
+    }
 
     close(clientSocket);
 }
@@ -91,7 +149,7 @@ int main()
     //클라이언트 접속 대기 준비
     int listenresult = listen(serverSocket, 5);
 
-    std::vector<int> clients;
+    std::vector<ClientInfo> clients;
     std::mutex clientsMutex;
 
     if (listenresult == -1)
@@ -118,12 +176,76 @@ int main()
             continue;
         }
 
-        // 접속한 클라이언트 소켓 저장
-        std::lock_guard<std::mutex> lock(clientsMutex);
-        clients.push_back(clientSocket);
+        char nicknameBuffer[100] = {};
 
-        std::cout << "Client connected!" << std::endl;
-        std::cout << "Connected clients: " << clients.size() << std::endl;
+        int nicknameBytes = recv(
+            clientSocket,
+            nicknameBuffer,
+            sizeof(nicknameBuffer) - 1,
+            0
+        );
+
+        if (nicknameBytes <= 0)
+        {
+            close(clientSocket);
+            continue;
+        }
+
+        std::string nickname(
+            nicknameBuffer,
+            nicknameBytes
+        );
+
+        //닉네임 검사하기
+        bool nicknameExists = false;
+
+        {
+            std::lock_guard<std::mutex> lock(clientsMutex);
+
+            for(const ClientInfo& client : clients)
+            {
+                if(client.nickname == nickname)
+                {
+                    nicknameExists = true;
+                    break;
+                }
+            }
+        }
+
+        if(nicknameExists)
+        {
+            std::string message = "이미 사용 중인 닉네임입니다.";
+
+            send(
+                clientSocket,
+                message.c_str(),
+                message.size(),
+                0
+            );
+
+            close(clientSocket);
+            continue;
+        }
+
+
+        // 접속한 클라이언트 소켓 저장
+        {
+            std::lock_guard<std::mutex> lock(clientsMutex);
+            clients.push_back({clientSocket,nickname});
+
+            std::cout << nickname << " connected!" << std::endl;
+            std::cout << "Connected clients: " << clients.size() << std::endl;
+
+            for(const ClientInfo& client : clients)
+            {
+                if(client.socket == clientSocket)
+                    continue;
+                // 닉네임 + 메시지 생성
+                std::string message = "[" + nickname + "]님이 접속했습니다.";
+
+                send(client.socket, message.c_str(), message.size(), 0);
+            }
+        }           
 
         std::thread(receiveMessages, clientSocket, std::ref(clients), std::ref(clientsMutex)).detach();
     }

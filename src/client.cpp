@@ -24,7 +24,7 @@ void receiveMessages(int clientSocket)
             break;
         }
 
-        std::cout << "\nClient: " << buffer << std::endl;
+        std::cout << "Client: " << buffer << std::endl;
     }
 }
 
@@ -42,6 +42,20 @@ int main()
         clientSocket,
         reinterpret_cast<sockaddr*>(&serverAddress),
         sizeof(serverAddress)
+    );
+
+
+    //닉네임 설정
+    std::string nickname;
+
+    std::cout << "Nickname: ";
+    std::getline(std::cin,nickname);
+
+    send(
+        clientSocket,
+        nickname.c_str(),
+        nickname.size(),
+        0
     );
 
     std::thread receiveThread(receiveMessages, clientSocket);
