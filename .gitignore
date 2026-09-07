@@ -1,0 +1,12 @@
+# Build outputs
+/server
+/client
+/src/server
+/src/client
+*.o
+*.out
+build/
+
+# IDE / OS
+.vscode/
+.DS_Store
