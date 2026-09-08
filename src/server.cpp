@@ -12,6 +12,7 @@ struct ClientInfo
 {
     int socket;
     std::string nickname;
+    int roomId;
 };
 
 void receiveMessages(int clientSocket, std::vector<ClientInfo>&clients, std::mutex& clientsMutex)
@@ -228,10 +229,29 @@ int main()
         }
 
 
+        //방 번호 설정
+        int roomId;
+
+        int roomBytes = recv(
+            clientSocket,
+            &roomId,
+            sizeof(roomId),
+            0
+        );
+
+        if(roomBytes <= 0)
+        {
+            close(clientSocket);
+            continue;
+        }
+
+        std::cout << nickname << " joined room " << roomId << std::endl;
+
+
         // 접속한 클라이언트 소켓 저장
         {
             std::lock_guard<std::mutex> lock(clientsMutex);
-            clients.push_back({clientSocket,nickname});
+            clients.push_back({clientSocket,nickname,1});
 
             std::cout << nickname << " connected!" << std::endl;
             std::cout << "Connected clients: " << clients.size() << std::endl;

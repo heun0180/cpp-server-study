@@ -47,14 +47,26 @@ int main()
 
     //닉네임 설정
     std::string nickname;
-
     std::cout << "Nickname: ";
     std::getline(std::cin,nickname);
-
+    
     send(
         clientSocket,
         nickname.c_str(),
         nickname.size(),
+        0
+    );
+
+
+    //방 번호 설정
+    int roomId;
+    std::cout << "Room ID: ";
+    std::cin >> roomId;
+
+    send(
+        clientSocket,
+        &roomId,
+        sizeof(roomId),
         0
     );
 
