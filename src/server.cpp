@@ -12,10 +12,14 @@ struct ClientInfo
 {
     int socket;
     std::string nickname;
-    int roomId;
+    std::string roomId;
 };
 
-void receiveMessages(int clientSocket, std::vector<ClientInfo>&clients, std::mutex& clientsMutex)
+void receiveMessages(
+    int clientSocket,
+    std::vector<ClientInfo>& clients,
+    std::mutex& clientsMutex
+)
 {
     while (true)
     {
@@ -34,16 +38,18 @@ void receiveMessages(int clientSocket, std::vector<ClientInfo>&clients, std::mut
         }
 
         std::string nickname;
+        std::string roomId;
 
-        // 메시지를 보낸 클라이언트의 닉네임 찾기
+        // 메시지를 보낸 클라이언트의 닉네임과 방 번호 찾기
         {
             std::lock_guard<std::mutex> lock(clientsMutex);
 
-            for(const ClientInfo& client : clients)
+            for (const ClientInfo& client : clients)
             {
-                if(client.socket == clientSocket)
+                if (client.socket == clientSocket)
                 {
                     nickname = client.nickname;
+                    roomId = client.roomId;
                     break;
                 }
             }
@@ -56,53 +62,82 @@ void receiveMessages(int clientSocket, std::vector<ClientInfo>&clients, std::mut
 
         std::cout << message << std::endl;
 
-
-
-        std::lock_guard<std::mutex> lock(clientsMutex);
-        for(const ClientInfo& client : clients)
+        // 같은 방 클라이언트에게만 메시지 전송
         {
-            if(client.socket == clientSocket)
+            std::lock_guard<std::mutex> lock(clientsMutex);
+
+            for (const ClientInfo& client : clients)
+            {
+                // 자기 자신에게는 보내지 않음
+                if (client.socket == clientSocket)
+                    continue;
+
+                // 다른 방이면 보내지 않음
+                if (client.roomId != roomId)
+                    continue;
+
+                send(
+                    client.socket,
+                    message.c_str(),
+                    message.size(),
+                    0
+                );
+            }
+        }
+    }
+
+    std::string nickname;
+    std::string roomId;
+
+    {
+        std::lock_guard<std::mutex> lock(clientsMutex);
+
+        // 삭제하기 전에 퇴장한 클라이언트 정보 찾기
+        for (const ClientInfo& client : clients)
+        {
+            if (client.socket == clientSocket)
+            {
+                nickname = client.nickname;
+                roomId = client.roomId;
+                break;
+            }
+        }
+
+        std::cout
+            << nickname
+            << " Client disconnected"
+            << std::endl;
+
+        // 연결 종료된 클라이언트를 목록에서 제거
+        clients.erase(
+            std::remove_if(
+                clients.begin(),
+                clients.end(),
+                [clientSocket](const ClientInfo& client)
+                {
+                    return client.socket == clientSocket;
+                }
+            ),
+            clients.end()
+        );
+
+        // 퇴장 메시지 생성
+        std::string closeSocketMessage =
+            nickname + "님이 퇴장했습니다.";
+
+        // 같은 방에 남아있는 클라이언트에게만 퇴장 알림
+        for (const ClientInfo& client : clients)
+        {
+            if (client.roomId != roomId)
                 continue;
 
-            send(client.socket, message.c_str(), message.size(), 0);
+            send(
+                client.socket,
+                closeSocketMessage.c_str(),
+                closeSocketMessage.size(),
+                0
+            );
         }
-    }
-
-    std::lock_guard<std::mutex> lock(clientsMutex); 
-
-    // 삭제하기 전에 퇴장한 클라이언트의 닉네임 찾기
-    std::string nickname;
-    for(const ClientInfo& client : clients)
-    {
-        if(client.socket == clientSocket)
-        {
-            nickname = client.nickname;
-            break;
-        }
-    }
-
-    std::cout << nickname.c_str() << " Client disconnected" << std::endl;
-
-    // 연결 종료된 클라이언트를 목록에서 제거
-    clients.erase(
-        std::remove_if(
-            clients.begin(),
-            clients.end(),
-            [clientSocket](const ClientInfo& client)
-            {
-                return client.socket == clientSocket;
-            }
-        ),
-        clients.end()
-    );
-
-    // 퇴장 메시지 생성
-    std::string closeSocketMessage =
-    nickname + "님이 퇴장했습니다.";
-
-    for(const ClientInfo& client : clients)
-    {
-        send(client.socket, closeSocketMessage.c_str(), closeSocketMessage.size(), 0);
     }
 
     close(clientSocket);
@@ -110,57 +145,80 @@ void receiveMessages(int clientSocket, std::vector<ClientInfo>&clients, std::mut
 
 int main()
 {
+    // TCP 통신에 사용할 소켓 생성
+    int serverSocket = socket(
+        AF_INET,
+        SOCK_STREAM,
+        0
+    );
 
-    // tcp 통신에 사용할 소켓 생성
-    int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-
-    if(serverSocket == -1)
+    if (serverSocket == -1)
     {
-        std::cout << "Socket creation failed" << std::endl;
+        std::cout
+            << "Socket creation failed"
+            << std::endl;
+
         return 1;
     }
 
-    std::cout << "Socket created:" << serverSocket << std::endl;
-    
+    std::cout
+        << "Socket created: "
+        << serverSocket
+        << std::endl;
 
-    //서버의 주소와 포트 설정
-    sockaddr_in ServerAddress{};
+    // 서버의 주소와 포트 설정
+    sockaddr_in serverAddress{};
 
-    ServerAddress.sin_family = AF_INET;
-    ServerAddress.sin_port = htons(7777);
-    ServerAddress.sin_addr.s_addr = INADDR_ANY;
-
+    serverAddress.sin_family = AF_INET;
+    serverAddress.sin_port = htons(7777);
+    serverAddress.sin_addr.s_addr = INADDR_ANY;
 
     // 소켓을 7777 포트에 연결
     int result = bind(
         serverSocket,
-        reinterpret_cast<sockaddr*>(&ServerAddress),
-        sizeof(ServerAddress)
+        reinterpret_cast<sockaddr*>(&serverAddress),
+        sizeof(serverAddress)
     );
 
     if (result == -1)
     {
-        std::cout << "Bind failed" << std::endl;
+        std::cout
+            << "Bind failed"
+            << std::endl;
+
         close(serverSocket);
+
         return 1;
     }
 
-    std::cout << "Bind success:port 7777 " << std::endl;
+    std::cout
+        << "Bind success: port 7777"
+        << std::endl;
 
-    //클라이언트 접속 대기 준비
-    int listenresult = listen(serverSocket, 5);
+    // 클라이언트 접속 대기 준비
+    int listenResult = listen(
+        serverSocket,
+        5
+    );
 
     std::vector<ClientInfo> clients;
     std::mutex clientsMutex;
 
-    if (listenresult == -1)
+    if (listenResult == -1)
     {
-        std::cout << "Listen failed: " << std::strerror(errno) << std::endl;
+        std::cout
+            << "Listen failed: "
+            << std::strerror(errno)
+            << std::endl;
+
         close(serverSocket);
+
         return 1;
     }
 
-    std::cout << "Server is listening on port 7777 " << std::endl;
+    std::cout
+        << "Server is listening on port 7777"
+        << std::endl;
 
     while (true)
     {
@@ -173,10 +231,14 @@ int main()
 
         if (clientSocket == -1)
         {
-            std::cout << "Accept failed" << std::endl;
+            std::cout
+                << "Accept failed"
+                << std::endl;
+
             continue;
         }
 
+        // 닉네임 받기
         char nicknameBuffer[100] = {};
 
         int nicknameBytes = recv(
@@ -197,15 +259,15 @@ int main()
             nicknameBytes
         );
 
-        //닉네임 검사하기
+        // 중복 닉네임 검사
         bool nicknameExists = false;
 
         {
             std::lock_guard<std::mutex> lock(clientsMutex);
 
-            for(const ClientInfo& client : clients)
+            for (const ClientInfo& client : clients)
             {
-                if(client.nickname == nickname)
+                if (client.nickname == nickname)
                 {
                     nicknameExists = true;
                     break;
@@ -213,9 +275,10 @@ int main()
             }
         }
 
-        if(nicknameExists)
+        if (nicknameExists)
         {
-            std::string message = "이미 사용 중인 닉네임입니다.";
+            std::string message =
+                "이미 사용 중인 닉네임입니다.";
 
             send(
                 clientSocket,
@@ -225,53 +288,87 @@ int main()
             );
 
             close(clientSocket);
+
             continue;
         }
 
-
-        //방 번호 설정
-        int roomId;
+        // 방 번호 받기
+        char roomIdBuffer[100] = {};
 
         int roomBytes = recv(
             clientSocket,
-            &roomId,
-            sizeof(roomId),
+            roomIdBuffer,
+            sizeof(roomIdBuffer) - 1,
             0
         );
 
-        if(roomBytes <= 0)
+        if (roomBytes <= 0)
         {
             close(clientSocket);
             continue;
         }
 
-        std::cout << nickname << " joined room " << roomId << std::endl;
+        std::string roomId(
+            roomIdBuffer,
+            roomBytes
+        );
 
+        std::cout
+            << nickname
+            << " joined room "
+            << roomId
+            << std::endl;
 
-        // 접속한 클라이언트 소켓 저장
+        // 접속한 클라이언트 저장
         {
             std::lock_guard<std::mutex> lock(clientsMutex);
-            clients.push_back({clientSocket,nickname,1});
 
-            std::cout << nickname << " connected!" << std::endl;
-            std::cout << "Connected clients: " << clients.size() << std::endl;
+            clients.push_back({
+                clientSocket,
+                nickname,
+                roomId
+            });
 
-            for(const ClientInfo& client : clients)
+            std::cout
+                << nickname
+                << " connected!"
+                << std::endl;
+
+            std::cout
+                << "Connected clients: "
+                << clients.size()
+                << std::endl;
+
+            // 접속 메시지 생성
+            std::string message =
+                "[" + nickname + "]님이 접속했습니다.";
+
+            // 같은 방에 있는 클라이언트에게만 접속 알림
+            for (const ClientInfo& client : clients)
             {
-                if(client.socket == clientSocket)
+                if (client.socket == clientSocket)
                     continue;
-                // 닉네임 + 메시지 생성
-                std::string message = "[" + nickname + "]님이 접속했습니다.";
 
-                send(client.socket, message.c_str(), message.size(), 0);
+                if (client.roomId != roomId)
+                    continue;
+
+                send(
+                    client.socket,
+                    message.c_str(),
+                    message.size(),
+                    0
+                );
             }
-        }           
+        }
 
-        std::thread(receiveMessages, clientSocket, std::ref(clients), std::ref(clientsMutex)).detach();
+        std::thread(
+            receiveMessages,
+            clientSocket,
+            std::ref(clients),
+            std::ref(clientsMutex)
+        ).detach();
     }
 
-
-    // 소켓 종료
     close(serverSocket);
 
     return 0;
