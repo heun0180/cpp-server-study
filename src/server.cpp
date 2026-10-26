@@ -14,7 +14,24 @@ struct ClientInfo
     int socket;
     std::string nickname;
     std::string roomId;
+    bool closing = false;
 };
+
+// clientsMutex를 잡은 상태에서 호출한다. close는 해당 수신 스레드가 담당한다.
+void sendToClient(ClientInfo& client, const std::string& message)
+{
+    if (client.closing)
+        return;
+
+    protocol::IoResult result = protocol::sendMessage(client.socket, message);
+    if (!result)
+    {
+        client.closing = true;
+        std::cout << "Send failed for " << client.nickname << ": "
+            << protocol::resultMessage(result) << std::endl;
+        shutdown(client.socket, SHUT_RDWR);
+    }
+}
 
 void receiveMessages(
     int clientSocket,
@@ -26,13 +43,25 @@ void receiveMessages(
     {
         std::string receivedMessage;
 
-        if (!protocol::receiveMessage(clientSocket, receivedMessage, protocol::maxMessageSize))
+        protocol::IoResult result = protocol::receiveMessage(
+            clientSocket,
+            receivedMessage,
+            protocol::maxMessageSize
+        );
+
+        if (!result)
         {
+            if (result.status != protocol::IoStatus::Closed)
+            {
+                std::cout << "Receive failed (socket " << clientSocket << "): "
+                    << protocol::resultMessage(result) << std::endl;
+            }
             break;
         }
 
         std::string nickname;
         std::string roomId;
+        bool closing = false;
 
         // 메시지를 보낸 클라이언트의 닉네임과 방 번호 찾기
         {
@@ -44,10 +73,14 @@ void receiveMessages(
                 {
                     nickname = client.nickname;
                     roomId = client.roomId;
+                    closing = client.closing;
                     break;
                 }
             }
         }
+
+        if (closing)
+            break;
 
         // 닉네임 + 메시지 생성
         std::string message =
@@ -60,7 +93,7 @@ void receiveMessages(
         {
             std::lock_guard<std::mutex> lock(clientsMutex);
 
-            for (const ClientInfo& client : clients)
+            for (ClientInfo& client : clients)
             {
                 // 자기 자신에게는 보내지 않음
                 if (client.socket == clientSocket)
@@ -70,8 +103,7 @@ void receiveMessages(
                 if (client.roomId != roomId)
                     continue;
 
-                if (!protocol::sendMessage(client.socket, message))
-                    shutdown(client.socket, SHUT_RDWR);
+                sendToClient(client, message);
             }
         }
     }
@@ -116,13 +148,12 @@ void receiveMessages(
             nickname + "님이 퇴장했습니다.";
 
         // 같은 방에 남아있는 클라이언트에게만 퇴장 알림
-        for (const ClientInfo& client : clients)
+        for (ClientInfo& client : clients)
         {
             if (client.roomId != roomId)
                 continue;
 
-            if (!protocol::sendMessage(client.socket, closeSocketMessage))
-                shutdown(client.socket, SHUT_RDWR);
+            sendToClient(client, closeSocketMessage);
         }
     }
 
@@ -224,11 +255,26 @@ int main()
             continue;
         }
 
+        protocol::IoResult result = protocol::configureSocket(clientSocket);
+        if (!result)
+        {
+            std::cout << "Socket setup failed: " << protocol::resultMessage(result) << std::endl;
+            close(clientSocket);
+            continue;
+        }
+
         // 닉네임 받기
         std::string nickname;
 
-        if (!protocol::receiveMessage(clientSocket, nickname, protocol::maxNicknameSize))
+        result = protocol::receiveMessage(
+            clientSocket,
+            nickname,
+            protocol::maxNicknameSize
+        );
+
+        if (!result)
         {
+            std::cout << "Nickname receive ended: " << protocol::resultMessage(result) << std::endl;
             close(clientSocket);
             continue;
         }
@@ -254,7 +300,9 @@ int main()
             std::string message =
                 "이미 사용 중인 닉네임입니다.";
 
-            protocol::sendMessage(clientSocket, message);
+            result = protocol::sendMessage(clientSocket, message);
+            if (!result)
+                std::cout << "Nickname reply failed: " << protocol::resultMessage(result) << std::endl;
 
             close(clientSocket);
 
@@ -264,8 +312,10 @@ int main()
         // 방 번호 받기
         std::string roomId;
 
-        if (!protocol::receiveMessage(clientSocket, roomId, protocol::maxRoomIdSize))
+        result = protocol::receiveMessage(clientSocket, roomId, protocol::maxRoomIdSize);
+        if (!result)
         {
+            std::cout << "Room ID receive ended: " << protocol::resultMessage(result) << std::endl;
             close(clientSocket);
             continue;
         }
@@ -301,7 +351,7 @@ int main()
                 "[" + nickname + "]님이 접속했습니다.";
 
             // 같은 방에 있는 클라이언트에게만 접속 알림
-            for (const ClientInfo& client : clients)
+            for (ClientInfo& client : clients)
             {
                 if (client.socket == clientSocket)
                     continue;
@@ -309,8 +359,7 @@ int main()
                 if (client.roomId != roomId)
                     continue;
 
-                if (!protocol::sendMessage(client.socket, message))
-                    shutdown(client.socket, SHUT_RDWR);
+                sendToClient(client, message);
             }
         }
 

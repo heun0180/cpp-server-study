@@ -2,8 +2,10 @@ import pathlib
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -128,7 +130,7 @@ def test_client(build_dir):
                         if truncated:
                             connection.close()
                             connection = None
-                            wait_until(lambda: b"Server disconnected" in log_path.read_bytes())
+                            wait_until(lambda: client.poll() is not None)
                         else:
                             expect_closed(connection)
 
@@ -149,6 +151,102 @@ def test_client(build_dir):
                         client.stdin.close()
 
     print("PASS: 클라이언트 분할·병합 수신, 문자열 방 번호, 길이 제한, 잘린 프레임")
+
+
+def test_connections(build_dir, register, alice, carol, server, server_log):
+    names = [f"parallel-{index}" for index in range(4)]
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        peers = list(executor.map(lambda name: register(name, "parallel-room"), names))
+        for connection in peers:
+            connection.settimeout(0.15)
+            try:
+                while True:
+                    receive_message(connection)
+            except socket.timeout:
+                pass
+            finally:
+                connection.settimeout(3)
+
+        list(executor.map(lambda peer: peer.sendall(frame("simultaneous")), peers))
+        for index, connection in enumerate(peers):
+            expected = {f"[{name}] simultaneous".encode() for name in names if name != names[index]}
+            actual = {receive_message(connection) for _ in range(3)}
+            assert actual == expected
+
+    disconnect(peers[0])
+    for connection in peers[1:]:
+        assert receive_message(connection) == "parallel-0님이 퇴장했습니다.".encode()
+    for connection in peers[1:]:
+        disconnect(connection)
+    expect_no_message(alice)
+    expect_no_message(carol)
+    print("PASS: 4개 클라이언트 동시 접속·동시 송신, 정상 종료 알림")
+
+    reset = register("reset-client", "1")
+    assert receive_message(alice) == "[reset-client]님이 접속했습니다.".encode()
+    reset.close()
+    assert receive_message(alice) == "reset-client님이 퇴장했습니다.".encode()
+    assert server.poll() is None
+
+    with (build_dir / "killed-client.log").open("wb") as output:
+        client = subprocess.Popen(
+            [str(build_dir / "client")], stdin=subprocess.PIPE,
+            stdout=output, stderr=subprocess.STDOUT,
+        )
+        try:
+            client.stdin.write(b"killed-client\n1\n")
+            client.stdin.flush()
+            wait_until(lambda: b"killed-client connected!" in server_log.read_bytes())
+            assert receive_message(alice) == "[killed-client]님이 접속했습니다.".encode()
+            client.stdin.write(b"before kill\n")
+            client.stdin.flush()
+            assert receive_message(alice) == b"[killed-client] before kill"
+            client.kill()
+            assert client.wait(timeout=3) < 0
+            assert receive_message(alice) == "killed-client님이 퇴장했습니다.".encode()
+        finally:
+            if client.poll() is None:
+                client.kill()
+                client.wait(timeout=3)
+            client.stdin.close()
+
+    replacement = register("killed-client", "1")
+    assert receive_message(alice) == "[killed-client]님이 접속했습니다.".encode()
+    replacement.sendall(frame("reconnected"))
+    assert receive_message(alice) == b"[killed-client] reconnected"
+    disconnect(replacement)
+    assert receive_message(alice) == "killed-client님이 퇴장했습니다.".encode()
+
+    for index in range(10):
+        name = f"churn-{index}"
+        connection = register(name, "churn-room")
+        connection.close()
+        wait_until(lambda: name.encode() + b" Client disconnected" in server_log.read_bytes())
+    assert server.poll() is None
+    expect_no_message(carol)
+    print("PASS: TCP RST, 실제 클라이언트 강제 종료, 닉네임 재사용과 반복 연결 정리")
+
+    log_path = build_dir / "server-end-client.log"
+    with log_path.open("wb") as output:
+        client = subprocess.Popen(
+            [str(build_dir / "client")], stdin=subprocess.PIPE,
+            stdout=output, stderr=subprocess.STDOUT,
+        )
+        try:
+            # 개행 없는 입력과 열린 stdin을 남겨 입력 대기 중 종료를 확인한다.
+            client.stdin.write(b"server-end-client\nserver-end-room\nunfinished")
+            client.stdin.flush()
+            wait_until(lambda: b"server-end-client connected!" in server_log.read_bytes())
+            server.terminate()
+            server.wait(timeout=3)
+            assert client.wait(timeout=3) == 0
+            assert b"Server disconnected:" in log_path.read_bytes()
+        finally:
+            if client.poll() is None:
+                client.kill()
+                client.wait(timeout=3)
+            client.stdin.close()
+    print("PASS: 서버 종료 후 입력 없이 클라이언트 자동 종료·소켓 정리")
 
 
 def test_server(build_dir):
@@ -247,6 +345,9 @@ def test_server(build_dir):
             assert receive_message(alice) == b"[healthy] after invalid frames"
             expect_no_message(carol)
             print("PASS: 잘못된 프레임 처리 후에도 새 접속과 기존 채팅 유지")
+            disconnect(healthy)
+            assert receive_message(alice) == "healthy님이 퇴장했습니다.".encode()
+            test_connections(build_dir, register, alice, carol, server, log_path)
         finally:
             for connection in connections:
                 disconnect(connection)
@@ -264,6 +365,18 @@ def main():
                 "-o", str(build_dir / target),
             ], check=True)
         print("PASS: 서버·클라이언트 C++17 빌드")
+        variants = [([], "protocol-test")]
+        if sys.platform == "darwin":
+            variants.append((["-DTEST_SO_NOSIGPIPE"], "protocol-test-nosigpipe"))
+        for flags, target in variants:
+            subprocess.run([
+                "clang++", "-std=c++17", "-pthread", "-Wall", "-Wextra",
+                "-Wpedantic", "-Wconversion", "-I", str(ROOT / "src"),
+                *flags, str(ROOT / "tests" / "test_protocol.cpp"),
+                "-o", str(build_dir / target),
+            ], check=True)
+            print(f"검증: {target}", flush=True)
+            subprocess.run([str(build_dir / target)], check=True, timeout=15)
         test_client(build_dir)
         test_server(build_dir)
 

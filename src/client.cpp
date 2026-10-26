@@ -4,18 +4,77 @@
 #include <unistd.h>
 #include <cstring>
 #include <thread>
+#include <atomic>
+#include <poll.h>
 #include "protocol.h"
 
-void receiveMessages(int clientSocket)
+bool readInputLine(
+    std::string& line,
+    std::string& inputBuffer,
+    const std::atomic<bool>& connected
+)
+{
+    while (connected.load())
+    {
+        std::size_t newline = inputBuffer.find('\n');
+        if (newline != std::string::npos)
+        {
+            line = inputBuffer.substr(0, newline);
+            inputBuffer.erase(0, newline + 1);
+            return true;
+        }
+
+        // 콘솔 입력이 없어도 수신 스레드의 종료 상태를 확인한다.
+        pollfd input{STDIN_FILENO, POLLIN, 0};
+        int result = poll(&input, 1, 100);
+        if (result == -1 && errno == EINTR)
+            continue;
+        if (result == -1)
+        {
+            std::cout << "Input poll failed: " << std::strerror(errno) << std::endl;
+            return false;
+        }
+        if (result == 0)
+            continue;
+
+        char buffer[1024];
+        ssize_t receivedBytes = read(STDIN_FILENO, buffer, sizeof(buffer));
+        if (receivedBytes == -1 && errno == EINTR)
+            continue;
+        if (receivedBytes == -1)
+        {
+            std::cout << "Input read failed: " << std::strerror(errno) << std::endl;
+            return false;
+        }
+        if (receivedBytes == 0)
+        {
+            line.swap(inputBuffer);
+            return !line.empty() && connected.load();
+        }
+
+        inputBuffer.append(buffer, static_cast<std::size_t>(receivedBytes));
+    }
+
+    return false;
+}
+
+void receiveMessages(int clientSocket, std::atomic<bool>& connected)
 {
     while (true)
     {
         std::string message;
 
-        if (!protocol::receiveMessage(clientSocket, message))
+        protocol::IoResult result = protocol::receiveMessage(clientSocket, message);
+        if (!result)
         {
+            bool wasConnected = connected.exchange(false);
             shutdown(clientSocket, SHUT_WR);
-            std::cout << "Server disconnected" << std::endl;
+            if (wasConnected)
+            {
+                const char* reason = result.status == protocol::IoStatus::Closed
+                    ? "Server disconnected: " : "Receive failed: ";
+                std::cout << reason << protocol::resultMessage(result) << std::endl;
+            }
             break;
         }
 
@@ -30,6 +89,14 @@ int main()
     if (clientSocket == -1)
     {
         std::cout << "Socket creation failed" << std::endl;
+        return 1;
+    }
+
+    protocol::IoResult sendResult = protocol::configureSocket(clientSocket);
+    if (!sendResult)
+    {
+        std::cout << "Socket setup failed: " << protocol::resultMessage(sendResult) << std::endl;
+        close(clientSocket);
         return 1;
     }
 
@@ -52,10 +119,13 @@ int main()
         return 1;
     }
 
+    std::atomic<bool> connected{true};
+    std::string inputBuffer;
+
     //닉네임 설정
     std::string nickname;
-    std::cout << "Nickname: ";
-    if (!std::getline(std::cin, nickname) || nickname.empty() ||
+    std::cout << "Nickname: " << std::flush;
+    if (!readInputLine(nickname, inputBuffer, connected) || nickname.empty() ||
         nickname.size() > protocol::maxNicknameSize)
     {
         std::cout << "Invalid nickname length (1-99 bytes)" << std::endl;
@@ -63,9 +133,10 @@ int main()
         return 1;
     }
 
-    if (!protocol::sendMessage(clientSocket, nickname))
+    sendResult = protocol::sendMessage(clientSocket, nickname);
+    if (!sendResult)
     {
-        std::cout << "Nickname send failed" << std::endl;
+        std::cout << "Nickname send failed: " << protocol::resultMessage(sendResult) << std::endl;
         close(clientSocket);
         return 1;
     }
@@ -73,9 +144,9 @@ int main()
 
     //방 번호 설정
     std::string roomId;
-    std::cout << "Room ID: ";
+    std::cout << "Room ID: " << std::flush;
 
-    if (!std::getline(std::cin, roomId) || roomId.empty() ||
+    if (!readInputLine(roomId, inputBuffer, connected) || roomId.empty() ||
         roomId.size() > protocol::maxRoomIdSize)
     {
         std::cout << "Invalid room ID length (1-99 bytes)" << std::endl;
@@ -83,21 +154,23 @@ int main()
         return 1;
     }
 
-    if (!protocol::sendMessage(clientSocket, roomId))
+    sendResult = protocol::sendMessage(clientSocket, roomId);
+    if (!sendResult)
     {
-        std::cout << "Room ID send failed" << std::endl;
+        std::cout << "Room ID send failed: " << protocol::resultMessage(sendResult) << std::endl;
         close(clientSocket);
         return 1;
     }
 
-    std::thread receiveThread(receiveMessages, clientSocket);
+    std::thread receiveThread(receiveMessages, clientSocket, std::ref(connected));
+    int exitCode = 0;
 
-    while (true)
+    while (connected.load())
     {
         std::string message;
 
-        std::cout << "Message: ";
-        if (!std::getline(std::cin, message))
+        std::cout << "Message: " << std::flush;
+        if (!readInputLine(message, inputBuffer, connected) || !connected.load())
             break;
 
         if (message.empty())
@@ -109,18 +182,21 @@ int main()
             continue;
         }
 
-        if (!protocol::sendMessage(clientSocket, message))
+        sendResult = protocol::sendMessage(clientSocket, message);
+        if (!sendResult)
         {
-            std::cout << "Message send failed" << std::endl;
+            std::cout << "Message send failed: " << protocol::resultMessage(sendResult) << std::endl;
+            exitCode = 1;
             break;
         }
     }
 
+    connected.store(false);
     shutdown(clientSocket, SHUT_RDWR);
     receiveThread.join();
 
-    //사용한 소켓 종료
+    // 수신 스레드가 소켓을 사용하므로 join 이후에만 닫는다.
     close(clientSocket);
 
-    return 0;
+    return exitCode;
 }
