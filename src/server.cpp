@@ -7,6 +7,7 @@
 #include <vector>
 #include <mutex>
 #include <algorithm>
+#include "protocol.h"
 
 struct ClientInfo
 {
@@ -23,16 +24,9 @@ void receiveMessages(
 {
     while (true)
     {
-        char buffer[1024] = {};
+        std::string receivedMessage;
 
-        int receivedBytes = recv(
-            clientSocket,
-            buffer,
-            sizeof(buffer) - 1,
-            0
-        );
-
-        if (receivedBytes <= 0)
+        if (!protocol::receiveMessage(clientSocket, receivedMessage, protocol::maxMessageSize))
         {
             break;
         }
@@ -58,7 +52,7 @@ void receiveMessages(
         // 닉네임 + 메시지 생성
         std::string message =
             "[" + nickname + "] " +
-            std::string(buffer, receivedBytes);
+            receivedMessage;
 
         std::cout << message << std::endl;
 
@@ -76,12 +70,8 @@ void receiveMessages(
                 if (client.roomId != roomId)
                     continue;
 
-                send(
-                    client.socket,
-                    message.c_str(),
-                    message.size(),
-                    0
-                );
+                if (!protocol::sendMessage(client.socket, message))
+                    shutdown(client.socket, SHUT_RDWR);
             }
         }
     }
@@ -131,12 +121,8 @@ void receiveMessages(
             if (client.roomId != roomId)
                 continue;
 
-            send(
-                client.socket,
-                closeSocketMessage.c_str(),
-                closeSocketMessage.size(),
-                0
-            );
+            if (!protocol::sendMessage(client.socket, closeSocketMessage))
+                shutdown(client.socket, SHUT_RDWR);
         }
     }
 
@@ -239,25 +225,13 @@ int main()
         }
 
         // 닉네임 받기
-        char nicknameBuffer[100] = {};
+        std::string nickname;
 
-        int nicknameBytes = recv(
-            clientSocket,
-            nicknameBuffer,
-            sizeof(nicknameBuffer) - 1,
-            0
-        );
-
-        if (nicknameBytes <= 0)
+        if (!protocol::receiveMessage(clientSocket, nickname, protocol::maxNicknameSize))
         {
             close(clientSocket);
             continue;
         }
-
-        std::string nickname(
-            nicknameBuffer,
-            nicknameBytes
-        );
 
         // 중복 닉네임 검사
         bool nicknameExists = false;
@@ -280,12 +254,7 @@ int main()
             std::string message =
                 "이미 사용 중인 닉네임입니다.";
 
-            send(
-                clientSocket,
-                message.c_str(),
-                message.size(),
-                0
-            );
+            protocol::sendMessage(clientSocket, message);
 
             close(clientSocket);
 
@@ -293,25 +262,13 @@ int main()
         }
 
         // 방 번호 받기
-        char roomIdBuffer[100] = {};
+        std::string roomId;
 
-        int roomBytes = recv(
-            clientSocket,
-            roomIdBuffer,
-            sizeof(roomIdBuffer) - 1,
-            0
-        );
-
-        if (roomBytes <= 0)
+        if (!protocol::receiveMessage(clientSocket, roomId, protocol::maxRoomIdSize))
         {
             close(clientSocket);
             continue;
         }
-
-        std::string roomId(
-            roomIdBuffer,
-            roomBytes
-        );
 
         std::cout
             << nickname
@@ -352,12 +309,8 @@ int main()
                 if (client.roomId != roomId)
                     continue;
 
-                send(
-                    client.socket,
-                    message.c_str(),
-                    message.size(),
-                    0
-                );
+                if (!protocol::sendMessage(client.socket, message))
+                    shutdown(client.socket, SHUT_RDWR);
             }
         }
 

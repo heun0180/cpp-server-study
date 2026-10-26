@@ -4,27 +4,22 @@
 #include <unistd.h>
 #include <cstring>
 #include <thread>
+#include "protocol.h"
 
 void receiveMessages(int clientSocket)
 {
     while (true)
     {
-        char buffer[1024] = {};
+        std::string message;
 
-        int receivedBytes = recv(
-            clientSocket,
-            buffer,
-            sizeof(buffer) - 1,
-            0
-        );
-
-        if (receivedBytes <= 0)
+        if (!protocol::receiveMessage(clientSocket, message))
         {
+            shutdown(clientSocket, SHUT_WR);
             std::cout << "Server disconnected" << std::endl;
             break;
         }
 
-        std::cout << "Client: " << buffer << std::endl;
+        std::cout << "Client: " << message << std::endl;
     }
 }
 
@@ -32,43 +27,68 @@ int main()
 {
     int clientSocket = socket(AF_INET, SOCK_STREAM, 0);
 
+    if (clientSocket == -1)
+    {
+        std::cout << "Socket creation failed" << std::endl;
+        return 1;
+    }
+
     sockaddr_in serverAddress{};
     serverAddress.sin_family = AF_INET;
     serverAddress.sin_port = htons(7777);
     inet_pton(AF_INET, "127.0.0.1", &serverAddress.sin_addr);
 
     //서버 연결 요청
-    connect(
+    int result = connect(
         clientSocket,
         reinterpret_cast<sockaddr*>(&serverAddress),
         sizeof(serverAddress)
     );
 
+    if (result == -1)
+    {
+        std::cout << "Connect failed: " << std::strerror(errno) << std::endl;
+        close(clientSocket);
+        return 1;
+    }
 
     //닉네임 설정
     std::string nickname;
     std::cout << "Nickname: ";
-    std::getline(std::cin,nickname);
-    
-    send(
-        clientSocket,
-        nickname.c_str(),
-        nickname.size(),
-        0
-    );
+    if (!std::getline(std::cin, nickname) || nickname.empty() ||
+        nickname.size() > protocol::maxNicknameSize)
+    {
+        std::cout << "Invalid nickname length (1-99 bytes)" << std::endl;
+        close(clientSocket);
+        return 1;
+    }
+
+    if (!protocol::sendMessage(clientSocket, nickname))
+    {
+        std::cout << "Nickname send failed" << std::endl;
+        close(clientSocket);
+        return 1;
+    }
 
 
     //방 번호 설정
-    int roomId;
+    std::string roomId;
     std::cout << "Room ID: ";
-    std::cin >> roomId;
 
-    send(
-        clientSocket,
-        &roomId,
-        sizeof(roomId),
-        0
-    );
+    if (!std::getline(std::cin, roomId) || roomId.empty() ||
+        roomId.size() > protocol::maxRoomIdSize)
+    {
+        std::cout << "Invalid room ID length (1-99 bytes)" << std::endl;
+        close(clientSocket);
+        return 1;
+    }
+
+    if (!protocol::sendMessage(clientSocket, roomId))
+    {
+        std::cout << "Room ID send failed" << std::endl;
+        close(clientSocket);
+        return 1;
+    }
 
     std::thread receiveThread(receiveMessages, clientSocket);
 
@@ -77,15 +97,27 @@ int main()
         std::string message;
 
         std::cout << "Message: ";
-        std::getline(std::cin, message);
+        if (!std::getline(std::cin, message))
+            break;
 
-        send(
-            clientSocket,
-            message.c_str(),
-            message.size(),
-            0
-        );
+        if (message.empty())
+            continue;
+
+        if (message.size() > protocol::maxMessageSize)
+        {
+            std::cout << "Message too long (max 4096 bytes)" << std::endl;
+            continue;
+        }
+
+        if (!protocol::sendMessage(clientSocket, message))
+        {
+            std::cout << "Message send failed" << std::endl;
+            break;
+        }
     }
+
+    shutdown(clientSocket, SHUT_RDWR);
+    receiveThread.join();
 
     //사용한 소켓 종료
     close(clientSocket);
