@@ -7,6 +7,7 @@
 #include <vector>
 #include <mutex>
 #include <algorithm>
+#include <system_error>
 #include "protocol.h"
 
 struct ClientInfo
@@ -33,12 +34,82 @@ void sendToClient(ClientInfo& client, const std::string& message)
     }
 }
 
+bool registerClient(
+    int clientSocket,
+    std::vector<ClientInfo>& clients,
+    std::timed_mutex& clientsMutex,
+    std::chrono::steady_clock::time_point deadline
+)
+{
+    std::string nickname;
+    protocol::IoResult result = protocol::receiveMessage(
+        clientSocket, nickname, protocol::maxNicknameSize, deadline
+    );
+    if (!result)
+    {
+        std::cout << "Nickname receive ended: " << protocol::resultMessage(result) << std::endl;
+        return false;
+    }
+
+    std::string roomId;
+    result = protocol::receiveMessage(clientSocket, roomId, protocol::maxRoomIdSize, deadline);
+    if (!result)
+    {
+        std::cout << "Room ID receive ended: " << protocol::resultMessage(result) << std::endl;
+        return false;
+    }
+
+    std::unique_lock<std::timed_mutex> lock(clientsMutex, std::defer_lock);
+    if (!lock.try_lock_until(deadline) || std::chrono::steady_clock::now() >= deadline)
+    {
+        std::cout << "Registration deadline exceeded (socket " << clientSocket << ")" << std::endl;
+        return false;
+    }
+
+    // 중복 검사와 목록 추가를 같은 잠금 안에서 처리한다.
+    for (const ClientInfo& client : clients)
+    {
+        if (client.nickname != nickname)
+            continue;
+
+        lock.unlock();
+        result = protocol::sendMessage(clientSocket, "이미 사용 중인 닉네임입니다.");
+        if (!result)
+            std::cout << "Nickname reply failed: " << protocol::resultMessage(result) << std::endl;
+        return false;
+    }
+
+    clients.push_back({clientSocket, nickname, roomId});
+
+    std::cout << nickname << " joined room " << roomId << std::endl;
+    std::cout << nickname << " connected!" << std::endl;
+    std::cout << "Connected clients: " << clients.size() << std::endl;
+
+    std::string message = "[" + nickname + "]님이 접속했습니다.";
+    for (ClientInfo& client : clients)
+    {
+        if (client.socket == clientSocket || client.roomId != roomId)
+            continue;
+
+        sendToClient(client, message);
+    }
+
+    return true;
+}
+
 void receiveMessages(
     int clientSocket,
     std::vector<ClientInfo>& clients,
-    std::mutex& clientsMutex
+    std::timed_mutex& clientsMutex,
+    std::chrono::steady_clock::time_point registrationDeadline
 )
 {
+    if (!registerClient(clientSocket, clients, clientsMutex, registrationDeadline))
+    {
+        close(clientSocket);
+        return;
+    }
+
     while (true)
     {
         std::string receivedMessage;
@@ -65,7 +136,7 @@ void receiveMessages(
 
         // 메시지를 보낸 클라이언트의 닉네임과 방 번호 찾기
         {
-            std::lock_guard<std::mutex> lock(clientsMutex);
+            std::lock_guard<std::timed_mutex> lock(clientsMutex);
 
             for (const ClientInfo& client : clients)
             {
@@ -91,7 +162,7 @@ void receiveMessages(
 
         // 같은 방 클라이언트에게만 메시지 전송
         {
-            std::lock_guard<std::mutex> lock(clientsMutex);
+            std::lock_guard<std::timed_mutex> lock(clientsMutex);
 
             for (ClientInfo& client : clients)
             {
@@ -112,7 +183,7 @@ void receiveMessages(
     std::string roomId;
 
     {
-        std::lock_guard<std::mutex> lock(clientsMutex);
+        std::lock_guard<std::timed_mutex> lock(clientsMutex);
 
         // 삭제하기 전에 퇴장한 클라이언트 정보 찾기
         for (const ClientInfo& client : clients)
@@ -219,7 +290,7 @@ int main()
     );
 
     std::vector<ClientInfo> clients;
-    std::mutex clientsMutex;
+    std::timed_mutex clientsMutex;
 
     if (listenResult == -1)
     {
@@ -255,6 +326,8 @@ int main()
             continue;
         }
 
+        // 닉네임과 방 번호 수신에 같은 마감 시각을 사용한다.
+        auto registrationDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
         protocol::IoResult result = protocol::configureSocket(clientSocket);
         if (!result)
         {
@@ -263,112 +336,21 @@ int main()
             continue;
         }
 
-        // 닉네임 받기
-        std::string nickname;
-
-        result = protocol::receiveMessage(
-            clientSocket,
-            nickname,
-            protocol::maxNicknameSize
-        );
-
-        if (!result)
+        try
         {
-            std::cout << "Nickname receive ended: " << protocol::resultMessage(result) << std::endl;
-            close(clientSocket);
-            continue;
-        }
-
-        // 중복 닉네임 검사
-        bool nicknameExists = false;
-
-        {
-            std::lock_guard<std::mutex> lock(clientsMutex);
-
-            for (const ClientInfo& client : clients)
-            {
-                if (client.nickname == nickname)
-                {
-                    nicknameExists = true;
-                    break;
-                }
-            }
-        }
-
-        if (nicknameExists)
-        {
-            std::string message =
-                "이미 사용 중인 닉네임입니다.";
-
-            result = protocol::sendMessage(clientSocket, message);
-            if (!result)
-                std::cout << "Nickname reply failed: " << protocol::resultMessage(result) << std::endl;
-
-            close(clientSocket);
-
-            continue;
-        }
-
-        // 방 번호 받기
-        std::string roomId;
-
-        result = protocol::receiveMessage(clientSocket, roomId, protocol::maxRoomIdSize);
-        if (!result)
-        {
-            std::cout << "Room ID receive ended: " << protocol::resultMessage(result) << std::endl;
-            close(clientSocket);
-            continue;
-        }
-
-        std::cout
-            << nickname
-            << " joined room "
-            << roomId
-            << std::endl;
-
-        // 접속한 클라이언트 저장
-        {
-            std::lock_guard<std::mutex> lock(clientsMutex);
-
-            clients.push_back({
+            std::thread(
+                receiveMessages,
                 clientSocket,
-                nickname,
-                roomId
-            });
-
-            std::cout
-                << nickname
-                << " connected!"
-                << std::endl;
-
-            std::cout
-                << "Connected clients: "
-                << clients.size()
-                << std::endl;
-
-            // 접속 메시지 생성
-            std::string message =
-                "[" + nickname + "]님이 접속했습니다.";
-
-            // 같은 방에 있는 클라이언트에게만 접속 알림
-            for (ClientInfo& client : clients)
-            {
-                if (client.socket == clientSocket)
-                    continue;
-
-                if (client.roomId != roomId)
-                    continue;
-
-                sendToClient(client, message);
-            }
+                std::ref(clients),
+                std::ref(clientsMutex),
+                registrationDeadline
+            ).detach();
         }
-
-        std::thread(
-            receiveMessages,
-            clientSocket,
-            std::ref(clients),
-            std::ref(clientsMutex)
-        ).detach();
+        catch (const std::system_error& error)
+        {
+            std::cout << "Client thread creation failed: " << error.what() << std::endl;
+            close(clientSocket);
+        }
     }
 
     close(serverSocket);

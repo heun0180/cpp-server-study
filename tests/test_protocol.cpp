@@ -211,6 +211,63 @@ void testInterruptedSend()
     std::cout << "PASS: full send buffer, EAGAIN, signals, 256 KiB integrity" << std::endl;
 }
 
+void testReceiveDeadline()
+{
+    int sockets[2];
+    createSocketPair(sockets);
+    auto start = std::chrono::steady_clock::now();
+    auto deadline = start + std::chrono::milliseconds(250);
+    std::thread sender([&]()
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        require(static_cast<bool>(protocol::sendMessage(sockets[1], "nickname")), "deadline nickname");
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        require(static_cast<bool>(protocol::sendMessage(sockets[1], "room")), "late room");
+    });
+
+    std::string message;
+    protocol::IoResult result = protocol::receiveMessage(sockets[0], message, 99, deadline);
+    require(static_cast<bool>(result) && message == "nickname", "nickname before deadline");
+    result = protocol::receiveMessage(sockets[0], message, 99, deadline);
+    auto elapsed = std::chrono::steady_clock::now() - start;
+    require(result.status == protocol::IoStatus::Timeout, "shared deadline across frames");
+    require(elapsed >= std::chrono::milliseconds(240) && elapsed < std::chrono::milliseconds(450),
+        "deadline duration");
+    sender.join();
+    result = protocol::receiveMessage(sockets[0], message, 99, deadline);
+    require(result.status == protocol::IoStatus::Timeout, "expired deadline with queued data");
+    close(sockets[0]);
+    close(sockets[1]);
+
+    createSocketPair(sockets);
+    pthread_t receiver = pthread_self();
+    signalCount = 0;
+    start = std::chrono::steady_clock::now();
+    deadline = start + std::chrono::milliseconds(250);
+    std::thread slowSender([&]()
+    {
+        std::uint32_t length = htonl(10);
+        require(static_cast<bool>(protocol::sendAll(
+            sockets[1], reinterpret_cast<const char*>(&length), sizeof(length)
+        )), "slow body header");
+        for (int i = 0; i < 8; ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            require(pthread_kill(receiver, SIGUSR1) == 0, "interrupt deadline poll");
+            require(static_cast<bool>(protocol::sendAll(sockets[1], "x", 1)), "slow body");
+        }
+        close(sockets[1]);
+    });
+    result = protocol::receiveMessage(sockets[0], message, 99, deadline);
+    elapsed = std::chrono::steady_clock::now() - start;
+    slowSender.join();
+    require(result.status == protocol::IoStatus::Timeout && signalCount > 0, "progress and EINTR deadline");
+    require(elapsed >= std::chrono::milliseconds(240) && elapsed < std::chrono::milliseconds(450),
+        "progress must not extend deadline");
+    close(sockets[0]);
+    std::cout << "PASS: fixed deadline across frames, partial body, EINTR, expired queued data" << std::endl;
+}
+
 int main()
 {
     struct sigaction action{};
@@ -224,4 +281,5 @@ int main()
     testBrokenSend();
     testInterruptedReceive();
     testInterruptedSend();
+    testReceiveDeadline();
 }

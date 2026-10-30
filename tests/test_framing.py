@@ -1,4 +1,5 @@
 import pathlib
+import select
 import socket
 import struct
 import subprocess
@@ -249,6 +250,124 @@ def test_connections(build_dir, register, alice, carol, server, server_log):
     print("PASS: 서버 종료 후 입력 없이 클라이언트 자동 종료·소켓 정리")
 
 
+def test_registration(build_dir, connect, register, observer, server_log):
+    pending = {}
+
+    def pending_connection():
+        started = time.monotonic()
+        connection = connect()
+        pending[connection] = started
+        return connection
+
+    idle = pending_connection()
+    healthy = register("registration-healthy", "1")
+    assert receive_message(observer) == "[registration-healthy]님이 접속했습니다.".encode()
+    healthy.sendall(frame("while first client is idle"))
+    assert receive_message(observer) == b"[registration-healthy] while first client is idle"
+    disconnect(healthy)
+    assert receive_message(observer) == "registration-healthy님이 퇴장했습니다.".encode()
+    print("PASS: 등록 정보를 보내지 않는 연결과 별개로 후속 접속·등록·채팅 진행", flush=True)
+
+    nickname_only = pending_connection()
+    nickname_only.sendall(frame("nickname-only"))
+    slow_nickname = pending_connection()
+    nickname_data = frame("n" * 80)
+    slow_nickname.sendall(nickname_data[:2])
+    slow_room = pending_connection()
+    room_data = frame("r" * 80)
+
+    # 정상 채팅에는 등록 마감 시각이 계속 적용되지 않는지도 확인한다.
+    late_start = time.monotonic()
+    late = connect()
+    next_tick = 1
+    completed = {}
+    while pending:
+        now = time.monotonic()
+        assert now - late_start < 18, "등록 제한 시간이 지나도 연결이 정리되지 않음"
+        if now - late_start >= next_tick and next_tick <= 14:
+            slow_nickname.sendall(nickname_data[next_tick + 1:next_tick + 2])
+            if next_tick == 8:
+                slow_room.sendall(frame("slow-room") + room_data[:1])
+            elif next_tick > 8:
+                index = next_tick - 8
+                slow_room.sendall(room_data[index:index + 1])
+            if next_tick == 12:
+                late.sendall(frame("late-success") + frame("1") + frame("before deadline"))
+                assert receive_message(observer) == "[late-success]님이 접속했습니다.".encode()
+                assert receive_message(observer) == b"[late-success] before deadline"
+            next_tick += 1
+
+        ready, _, _ = select.select(list(pending), [], [], 0.05)
+        for connection in ready:
+            expect_closed(connection)
+            elapsed = time.monotonic() - pending.pop(connection)
+            assert 14.5 <= elapsed <= 17, f"등록 제한 시간 오류: {elapsed:.2f}초"
+            completed[connection] = elapsed
+            connection.close()
+
+    assert idle in completed and nickname_only in completed
+    assert slow_nickname in completed and slow_room in completed
+    expect_no_message(observer)
+    late.sendall(frame("after registration timeout window"))
+    assert receive_message(observer) == b"[late-success] after registration timeout window"
+    disconnect(late)
+    assert receive_message(observer) == "late-success님이 퇴장했습니다.".encode()
+    times = ", ".join(f"{value:.2f}초" for value in completed.values())
+    print(f"PASS: 무입력·닉네임만 전송·분할 헤더/본문·필드 사이 지연의 전체 15초 제한 ({times})")
+
+    reused = register("nickname-only", "1")
+    assert receive_message(observer) == "[nickname-only]님이 접속했습니다.".encode()
+    disconnect(reused)
+    assert receive_message(observer) == "nickname-only님이 퇴장했습니다.".encode()
+
+    log_path = build_dir / "registration-killed-client.log"
+    with log_path.open("wb") as output:
+        client = subprocess.Popen(
+            [str(build_dir / "client")], stdin=subprocess.PIPE,
+            stdout=output, stderr=subprocess.STDOUT,
+        )
+        try:
+            client.stdin.write(b"registration-killed\n")
+            client.stdin.flush()
+            wait_until(lambda: b"Room ID:" in log_path.read_bytes())
+            client.kill()
+            assert client.wait(timeout=3) < 0
+        finally:
+            if client.poll() is None:
+                client.kill()
+                client.wait(timeout=3)
+            client.stdin.close()
+    expect_no_message(observer)
+    assert b"registration-killed connected!" not in server_log.read_bytes()
+    print("PASS: 등록 중 실제 클라이언트 강제 종료 시 목록·입퇴장 알림 없음")
+
+    contenders = [connect() for _ in range(8)]
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(lambda connection: connection.sendall(frame("same-nickname") + frame("1")), contenders))
+    assert receive_message(observer) == "[same-nickname]님이 접속했습니다.".encode()
+    winners = []
+    for connection in contenders:
+        connection.settimeout(1)
+        try:
+            message = receive_message(connection)
+        except socket.timeout:
+            winners.append(connection)
+        else:
+            assert message == "이미 사용 중인 닉네임입니다.".encode()
+            expect_closed(connection)
+            connection.close()
+        finally:
+            if connection.fileno() != -1:
+                connection.settimeout(3)
+    assert len(winners) == 1
+    expect_no_message(observer)
+    winners[0].sendall(frame("only one winner"))
+    assert receive_message(observer) == b"[same-nickname] only one winner"
+    disconnect(winners[0])
+    assert receive_message(observer) == "same-nickname님이 퇴장했습니다.".encode()
+    print("PASS: 같은 닉네임으로 8개 연결 동시 등록 시 한 개만 성공, 알림 중복 없음")
+
+
 def test_server(build_dir):
     connections = []
     log_path = build_dir / "server.log"
@@ -275,6 +394,7 @@ def test_server(build_dir):
             assert server.poll() is None, log_path.read_text()
 
             alice = register("alice", "1")
+            test_registration(build_dir, connect, register, alice, log_path)
             bob = connect()
             bob.sendall(frame("bob") + frame("1") + frame("first") + frame("second"))
             assert receive_message(alice) == "[bob]님이 접속했습니다.".encode()
@@ -297,7 +417,7 @@ def test_server(build_dir):
             print("PASS: 닉네임·방 번호·채팅 헤더와 본문의 분할 수신, 방 분리")
 
             duplicate = connect()
-            duplicate.sendall(frame("alice"))
+            duplicate.sendall(frame("alice") + frame("1"))
             assert receive_message(duplicate) == "이미 사용 중인 닉네임입니다.".encode()
             expect_closed(duplicate)
             duplicate.close()

@@ -6,6 +6,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <chrono>
+#include <poll.h>
+#include <limits>
+#include <algorithm>
 #include <string>
 
 namespace protocol
@@ -22,7 +26,8 @@ enum class IoStatus
     Closed,
     Error,
     InvalidLength,
-    IncompleteFrame
+    IncompleteFrame,
+    Timeout
 };
 
 struct IoResult
@@ -50,6 +55,8 @@ inline const char* resultMessage(const IoResult& result)
         return "Invalid frame length";
     case IoStatus::IncompleteFrame:
         return "Connection closed during frame";
+    case IoStatus::Timeout:
+        return "Receive deadline exceeded";
     }
 
     return "Unknown I/O status";
@@ -97,15 +104,48 @@ inline IoResult sendAll(int socket, const char* data, std::size_t size)
     return {IoStatus::Success};
 }
 
-inline IoResult receiveAll(int socket, char* data, std::size_t size)
+inline IoResult receiveAll(
+    int socket,
+    char* data,
+    std::size_t size,
+    std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max()
+)
 {
     std::size_t received = 0;
+    bool hasDeadline = deadline != std::chrono::steady_clock::time_point::max();
 
     while (received < size)
     {
-        ssize_t receivedBytes = recv(socket, data + received, size - received, 0);
+        if (hasDeadline)
+        {
+            auto now = std::chrono::steady_clock::now();
+            if (now >= deadline)
+                return {IoStatus::Timeout};
+
+            auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now).count();
+            int timeout = static_cast<int>(std::min<std::chrono::milliseconds::rep>(
+                remaining, std::numeric_limits<int>::max()
+            ));
+            pollfd input{socket, POLLIN, 0};
+            int result = poll(&input, 1, timeout);
+            if (result == -1 && errno == EINTR)
+                continue;
+            if (result == -1)
+                return {IoStatus::Error, errno};
+            if (result == 0)
+                continue;
+            if (std::chrono::steady_clock::now() >= deadline)
+                return {IoStatus::Timeout};
+        }
+
+        // 제한 시간은 poll로 관리하고 recv 자체는 블로킹하지 않는다.
+        int flags = hasDeadline ? MSG_DONTWAIT : 0;
+        ssize_t receivedBytes = recv(socket, data + received, size - received, flags);
 
         if (receivedBytes == -1 && errno == EINTR)
+            continue;
+
+        if (receivedBytes == -1 && hasDeadline && (errno == EAGAIN || errno == EWOULDBLOCK))
             continue;
 
         if (receivedBytes == -1)
@@ -116,6 +156,9 @@ inline IoResult receiveAll(int socket, char* data, std::size_t size)
 
         received += static_cast<std::size_t>(receivedBytes);
     }
+
+    if (hasDeadline && std::chrono::steady_clock::now() >= deadline)
+        return {IoStatus::Timeout};
 
     return {IoStatus::Success};
 }
@@ -138,12 +181,13 @@ inline IoResult sendMessage(int socket, const std::string& message)
 inline IoResult receiveMessage(
     int socket,
     std::string& message,
-    std::size_t maxSize = maxFrameSize
+    std::size_t maxSize = maxFrameSize,
+    std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max()
 )
 {
     std::uint32_t length = 0;
 
-    IoResult result = receiveAll(socket, reinterpret_cast<char*>(&length), sizeof(length));
+    IoResult result = receiveAll(socket, reinterpret_cast<char*>(&length), sizeof(length), deadline);
     if (!result)
         return result;
 
@@ -155,7 +199,7 @@ inline IoResult receiveMessage(
 
     message.resize(length);
 
-    result = receiveAll(socket, message.data(), message.size());
+    result = receiveAll(socket, message.data(), message.size(), deadline);
     if (result.status == IoStatus::Closed)
         result.status = IoStatus::IncompleteFrame;
 
